@@ -1,5 +1,4 @@
 use std::iter::once;
-use std::path::PathBuf;
 
 use anyhow::*;
 use common::*;
@@ -97,46 +96,10 @@ fn main() -> anyhow::Result<()> {
 
     cargo::track_file(&header_file);
 
-    // When ESP-IDF v6.0+ uses picolibc (instead of newlib), clang/bindgen doesn't understand
-    // GCC's -specs=picolibc.specs and falls back to the newlib sysroot headers, causing errors.
-    // Detect the picolibc include dir (relative to the GCC sysroot) and inject it via the
-    // Factory's clang args so it is searched before the sysroot -I path added by embuild.
-    let picolibc_include: Option<PathBuf> = build_output.env_path.as_deref().and_then(|env_path| {
-        let gcc_name = if mcu != "esp32" && mcu != "esp32s2" && mcu != "esp32s3" {
-            "riscv32-esp-elf-gcc"
-        } else {
-            "xtensa-esp-elf-gcc"
-        };
-        let gcc = which::which_in_global(gcc_name, Some(env_path)).ok()?.next()?;
-        let ld = gcc.with_file_name(
-            gcc.file_name()?.to_string_lossy().replace("gcc", "ld")
-        );
-        let sysroot = embuild::cmd!(&ld, "--print-sysroot").stdout().ok()?;
-        let sysroot = PathBuf::from(sysroot.trim());
-        // picolibc lives at <sysroot>/../picolibc/include
-        let picolibc = sysroot.parent()?.join("picolibc").join("include");
-        if picolibc.join("stdio.h").exists() {
-            Some(picolibc)
-        } else {
-            None
-        }
-    });
-
-    // Inject picolibc include into the Factory's clang_args so it is ordered before
-    // the sysroot -I (which embuild appends after Factory::clang_args in create_builder).
-    // Using -I ensures picolibc headers take priority over the newlib sysroot headers.
-    let bindgen_factory = if let Some(ref picolibc) = picolibc_include {
-        build_output.bindgen.clone().with_clang_args(
-            [format!("-I{}", picolibc.display())]
-        )
-    } else {
-        build_output.bindgen.clone()
-    };
-
     // Because we have multiple bindgen invocations and we can't clone a bindgen::Builder,
     // we have to set the options every time.
     let configure_bindgen = |bindgen: embuild::bindgen::types::Builder| {
-        let bindgen = bindgen
+        Ok(bindgen
             .parse_callbacks(Box::new(BindgenCallbacks))
             .use_core()
             .enable_function_attribute_detection()
@@ -159,8 +122,7 @@ fn main() -> anyhow::Result<()> {
                     // We don't really have a similar issue with Xtensa, but we pass it explicitly as well just in case
                     "xtensa"
                 },
-            ]);
-        Ok(bindgen)
+            ]))
     };
 
     let bindings_file = bindgen_utils::default_bindings_file()?;
@@ -185,7 +147,7 @@ fn main() -> anyhow::Result<()> {
             .inspect(|h| cargo::track_file(h)),
     );
 
-    configure_bindgen(bindgen_factory.clone().builder()?)?
+    configure_bindgen(build_output.bindgen.clone().builder()?)?
         .path_headers(headers)?
         .generate()
         .with_context(bindgen_err)?
@@ -202,7 +164,7 @@ fn main() -> anyhow::Result<()> {
             BufWriter::new(fs::File::options().append(true).open(&bindings_file)?);
 
         for (module_name, headers) in build_output.config.native.module_bindings_headers()? {
-            let bindings = configure_bindgen(bindgen_factory.clone().builder()?)?
+            let bindings = configure_bindgen(build_output.bindgen.clone().builder()?)?
                 .path_headers(headers.into_iter().inspect(|h| cargo::track_file(h)))?
                 .generate()?;
 
