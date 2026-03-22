@@ -7,3 +7,8 @@ CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 
 # OpenThread support
 CONFIG_OPENTHREAD_ENABLED=y
+
+# ESP-IDF v6.0 defaults to picolibc, but clang/bindgen doesn't understand GCC's
+# -specs=picolibc.specs and falls back to newlib sysroot headers, causing build errors.
+# TODO: fix bindgen to inject the picolibc include path and remove this workaround.
+CONFIG_LIBC_NEWLIB=y

@@ -50,6 +50,24 @@ impl ParseCallbacks for BindgenCallbacks {
 fn main() -> anyhow::Result<()> {
     let build_output = build_driver::build()?;
 
+    let kconfig_args: Vec<_> = build_output.kconfig_args.collect();
+
+    // Picolibc is not compatible with clang/bindgen: this should be picked up by the
+    // toolchain KConfig as CONFIG_LIBC_PICOLIBC is set to be incompatible with
+    // IDF_TOOLCHAIN_CLANG, but cargo_driver always selects the GCC cmake toolchain
+    // file (toolchain-{chip}.cmake), so IDF_TOOLCHAIN_CLANG is never set and
+    // ESP-IDF v6.0 defaults to picolibc.
+    // Use CONFIG_LIBC_NEWLIB=y as a workaround.
+    if kconfig_args.iter().any(|(k, v)| {
+        k == "LIBC_PICOLIBC" && matches!(v, kconfig::Value::Tristate(kconfig::Tristate::True))
+    }) {
+        bail!(
+            "ESP-IDF is configured to use picolibc (CONFIG_LIBC_PICOLIBC=y), which is not \
+             compatible with bindgen. Set CONFIG_LIBC_NEWLIB=y in your sdkconfig or \
+             sdkconfig.defaults to use newlib instead."
+        );
+    }
+
     // We need to restrict the kconfig parameters which are turned into rustc cfg items
     // because otherwise we would be hitting rustc command line restrictions on Windows
     //
@@ -60,8 +78,8 @@ fn main() -> anyhow::Result<()> {
     let kconfig_str_allow = regex::Regex::new(r"IDF_TARGET")?;
 
     let cfg_args = build::CfgArgs {
-        args: build_output
-            .kconfig_args
+        args: kconfig_args
+            .into_iter()
             .filter(|(key, value)| {
                 matches!(value, kconfig::Value::Tristate(kconfig::Tristate::True))
                     || kconfig_str_allow.is_match(key)
