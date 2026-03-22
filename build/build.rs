@@ -52,12 +52,11 @@ fn main() -> anyhow::Result<()> {
 
     let kconfig_args: Vec<_> = build_output.kconfig_args.collect();
 
-    // Picolibc is not compatible with clang/bindgen: this should be picked up by the
-    // toolchain KConfig as CONFIG_LIBC_PICOLIBC is set to be incompatible with
-    // IDF_TOOLCHAIN_CLANG, but cargo_driver always selects the GCC cmake toolchain
-    // file (toolchain-{chip}.cmake), so IDF_TOOLCHAIN_CLANG is never set and
-    // ESP-IDF v6.0 defaults to picolibc.
-    // Use CONFIG_LIBC_NEWLIB=y as a workaround.
+    // Picolibc is not compatible with clang/bindgen: clang silently ignores GCC's
+    // -specs=picolibc.specs, causing it to use the wrong sysroot stdlib headers.
+    // cargo_driver now selects the clang cmake toolchain file when available, which sets
+    // IDF_TOOLCHAIN=clang and causes ESP-IDF Kconfig to default to newlib. This check
+    // remains as a safety net in case the user has explicitly set CONFIG_LIBC_PICOLIBC=y.
     if kconfig_args.iter().any(|(k, v)| {
         k == "LIBC_PICOLIBC" && matches!(v, kconfig::Value::Tristate(kconfig::Tristate::True))
     }) {

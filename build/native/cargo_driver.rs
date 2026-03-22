@@ -438,12 +438,25 @@ pub fn build() -> Result<EspIdfBuildOutput> {
             .chain(sdkconfig.as_ref()),
     )?;
 
-    let cmake_toolchain_file = path_buf![
+    // Prefer the clang toolchain file when available — this sets IDF_TOOLCHAIN=clang in
+    // cmake, which causes ESP-IDF Kconfig to default to newlib instead of picolibc.
+    let clang_toolchain = path_buf![
         &idf.esp_idf_dir.path(),
         "tools",
         "cmake",
-        chip.cmake_toolchain_file()
+        format!("toolchain-clang-{chip}.cmake")
     ];
+    let use_clang_toolchain = clang_toolchain.exists();
+    let cmake_toolchain_file = if use_clang_toolchain {
+        clang_toolchain
+    } else {
+        path_buf![
+            &idf.esp_idf_dir.path(),
+            "tools",
+            "cmake",
+            chip.cmake_toolchain_file()
+        ]
+    };
 
     // Get the directories of all extra components to build.
     let extra_component_dirs = to_cmake_path_list(config.native.extra_component_dirs()?)?;
@@ -477,6 +490,10 @@ pub fn build() -> Result<EspIdfBuildOutput> {
         .env("SDKCONFIG_DEFAULTS", defaults_files)
         .env("IDF_TARGET", &chip_name)
         .env("PROJECT_DIR", to_cmake_path_list([&workspace_dir])?);
+
+    if use_clang_toolchain {
+        cmake_config.env("IDF_TOOLCHAIN", "clang");
+    }
 
     // Export all installed tools environment vars necessary for the ESP-IDF CMake build.
     for (var, value) in &idf.exported_env_vars {
@@ -596,7 +613,23 @@ pub fn build() -> Result<EspIdfBuildOutput> {
                 .force_ldproxy(true)
                 .build()?,
         ),
-        bindgen: bindgen::Factory::from_cmake(&target.compile_groups[0])?.with_linker(&compiler),
+        bindgen: {
+            let factory = bindgen::Factory::from_cmake(&target.compile_groups[0])?;
+            // When using the clang toolchain, the compiler is `clang` which doesn't support
+            // --print-sysroot. Use the GCC ld to get the sysroot instead.
+            if use_clang_toolchain {
+                let gcc_ld_name = format!("{}-ld", chip.gcc_toolchain(version.as_ref()));
+                let gcc_ld = which::which_in_global(&gcc_ld_name, Some(&idf.exported_path))
+                    .ok().and_then(|mut it| it.next());
+                if let Some(gcc_ld) = gcc_ld {
+                    factory.with_linker(&gcc_ld)
+                } else {
+                    factory.with_linker(&compiler)
+                }
+            } else {
+                factory.with_linker(&compiler)
+            }
+        },
         components: EspIdfComponents::from(components),
         kconfig_args: Box::new(
             kconfig::try_from_json_file(sdkconfig_json.clone())
