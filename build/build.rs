@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::iter::once;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::*;
 use common::*;
-use embuild::bindgen::types::callbacks::{IntKind, ParseCallbacks};
+use embuild::bindgen::types::callbacks::{IntKind, ParseCallbacks, Token, TokenKind};
 use embuild::bindgen::BindgenExt;
 use embuild::utils::OsStrExt;
 use embuild::{bindgen as bindgen_utils, build, cargo, kconfig, path_buf};
@@ -29,11 +31,78 @@ use native as build_driver;
 #[cfg(all(not(feature = "native"), feature = "pio"))]
 use pio as build_driver;
 
-#[derive(Debug)]
-struct BindgenCallbacks;
+#[derive(Debug, Default)]
+struct BindgenCallbacks {
+    // Used to track macro "types", see modify_macro below.
+    macro_types: Mutex<HashMap<String, &'static str>>,
+}
+
+// C types allowed to appear as casts in PSA_* macros; their casts will be stripped so bindgen
+// can evaluate the macro as a plain integer constant.
+const ALLOWED_PSA_TYPES: &[&str] = &[
+    "psa_algorithm_t",
+    "psa_crypto_local_input_t",
+    "psa_crypto_local_output_t",
+    "psa_crypto_transaction_type_t",
+    "psa_dh_family_t",
+    "psa_driver_get_entropy_flags_t",
+    "psa_ecc_family_t",
+    "psa_handle_t",
+    // Only used once to define PSA_KEY_BITS_TOO_LARGE = -1, which breaks logic below.
+    //"psa_key_bits_t",
+    "psa_key_derivation_step_t",
+    "psa_key_id_t",
+    "psa_key_lifetime_t",
+    "psa_key_location_t",
+    "psa_key_persistence_t",
+    "psa_key_type_t",
+    "psa_key_usage_t",
+    "psa_pake_primitive_type_t",
+    "psa_pake_role_t",
+    "psa_pake_step_t",
+    "psa_status_t",
+];
 
 impl ParseCallbacks for BindgenCallbacks {
+    fn modify_macro(&self, name: &str, tokens: &mut Vec<Token>) {
+        // Many PSA_ macros are defined as ((psa_type_t)-1234), which bindgen can't evaluate.
+        // See https://github.com/rust-lang/rust-bindgen/issues/316 for context.
+        // Strip the cast if the type is in ALLOWED_PSA_TYPES, leaving just the numeric literal.
+        // This should be reasonably safe as we allowlist types, and if removing (type_t) still
+        // doesn't result in a valid integer, bindgen will just skip the macro as usual.
+        if name.starts_with("PSA_") {
+            // Token stream: '(' '(' '<type>' ')' <literal> ')'
+            // Remove the inner cast '(' '<type>' ')', keeping outer parens and value.
+            if let Some(i) = tokens.windows(3).position(|w| {
+                w[0] == Token::from((TokenKind::Punctuation, b"(" as &[u8]))
+                    && w[1].kind == TokenKind::Identifier
+                    && w[2] == Token::from((TokenKind::Punctuation, b")" as &[u8]))
+            }) {
+                if let Some(type_name) = ALLOWED_PSA_TYPES
+                    .iter()
+                    .find(|&&t| t.as_bytes() == &*tokens[i + 1].raw)
+                {
+                    self.macro_types
+                        .lock()
+                        .unwrap()
+                        .insert(name.to_string(), *type_name);
+                    tokens.drain(i..i + 3);
+                }
+            }
+        }
+    }
+
     fn int_macro(&self, name: &str, _value: i64) -> Option<IntKind> {
+        if name.starts_with("PSA_") {
+            // Look for the type in the hashmap, we only need it once so we can remove it.
+            if let Some(type_name) = self.macro_types.lock().unwrap().remove(name) {
+                return Some(IntKind::Custom {
+                    name: type_name,
+                    is_signed: true,
+                });
+            }
+        }
+
         // Make sure the ESP_ERR_*, ESP_OK and ESP_FAIL macros are all i32.
         const PREFIX: &str = "ESP_";
         const SUFFIX: &str = "ERR_";
@@ -152,7 +221,7 @@ fn main() -> anyhow::Result<()> {
     // we have to set the options every time.
     let configure_bindgen = |bindgen: embuild::bindgen::types::Builder| {
         let bindgen = bindgen
-            .parse_callbacks(Box::new(BindgenCallbacks))
+            .parse_callbacks(Box::new(BindgenCallbacks::default()))
             .use_core()
             .enable_function_attribute_detection()
             .clang_arg("-DESP_PLATFORM")
