@@ -49,4 +49,4 @@ which = "4.4"
 
 # TODO: Remove this before next release, needed for IDF >6.0.0 support
 [patch.crates-io]
-embuild = { git = "https://github.com/esp-rs/embuild", branch = "master" }
+embuild = { git = "https://github.com/drinkcat/embuild", branch = "bindgen" }

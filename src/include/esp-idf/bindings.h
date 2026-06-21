@@ -318,7 +318,13 @@
 
 #ifdef ESP_IDF_COMP_MBEDTLS_ENABLED
 #include "mbedtls/ssl.h"
-#if ESP_IDF_VERSION_MAJOR < 6
+#if ESP_IDF_VERSION_MAJOR >= 6
+// For self-test functions.
+// For some reason ssl_misc.h includes the other private headers, but not these 2.
+#include "psa/crypto.h"
+#include "mbedtls/private/aes.h"
+#include "mbedtls/private/rsa.h"
+#else
 #include "mbedtls/aes.h"
 #include "mbedtls/cipher.h"
 #include "mbedtls/entropy.h"
